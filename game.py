@@ -1,127 +1,270 @@
 #!/usr/bin/env python3
 import random
 import curses
+import time
 
 # Game dimensions (internal playable area)
-WIDTH = 30
-HEIGHT = 15
+WIDTH = 50
+HEIGHT = 20
 
 # Game state
 score = 0
 lives = 5
+cats_killed = 0
+CATS_TO_WIN = 50
+game_start_time = 0
 
-# Dog position (center bottom of playable area)
+# Dog position (center of playable area)
 dog_x = WIDTH // 2
-dog_y = HEIGHT - 1
+dog_y = HEIGHT // 2
 
-# Cats at the top - list of (x, symbol)
+# Cats list
 cats = []
 
-# Lasers - list of {x, y}
+# Lasers list
 lasers = []
 
 # Frame counter for spawning
 frame_count = 0
-SPAWN_INTERVAL = 20  # Spawn new cat every 20 frames (2 seconds)
+SPAWN_INTERVAL = 15  # Spawn new cat every 15 frames
 
-# Cat movement speed (move every N frames)
+# Cat movement speed
 cat_move_counter = 0
-CAT_MOVE_INTERVAL = 8  # Cats move every 8 frames (much slower)
+CAT_MOVE_INTERVAL = 6
 
-MAX_CATS = 5  # Maximum cats on screen
+MAX_CATS = 7
 
 # Last direction pressed (for shooting)
-last_direction = 'up'  # default shoot upward
+last_direction = 'up'
+
+# Room decorations (fixed positions) - furniture the player can't walk through
+FURNITURE = []
+
+# ASCII Art for the dog (multi-char representation stored as offsets)
+DOG_CHARS = {
+    'up':    ['▲', '╬'],
+    'down':  ['╬', '▼'],
+    'left':  ['◄═', '╬ '],
+    'right': ['═►', ' ╬'],
+}
+
+def get_elapsed_time():
+    elapsed = int(time.time() - game_start_time)
+    minutes = elapsed // 60
+    seconds = elapsed % 60
+    return f"{minutes:02d}:{seconds:02d}"
 
 def init_cats():
     global cats
     cats = []
-    for _ in range(3):
+    for _ in range(2):
         spawn_cat()
+
+def init_furniture():
+    global FURNITURE
+    FURNITURE = [
+        # Couch at bottom
+        {'x': 5, 'y': HEIGHT - 3, 'char': '[▀▀▀▀▀▀▀]'},
+        # Lamp in corner
+        {'x': WIDTH - 6, 'y': HEIGHT - 4, 'char': ' () '},
+        {'x': WIDTH - 6, 'y': HEIGHT - 3, 'char': ' || '},
+        {'x': WIDTH - 6, 'y': HEIGHT - 2, 'char': '===='},
+        # Table
+        {'x': 3, 'y': 5, 'char': '┌───┐'},
+        {'x': 3, 'y': 6, 'char': '│   │'},
+        {'x': 3, 'y': 7, 'char': '└───┘'},
+    ]
 
 def draw_canvas(stdscr):
     stdscr.clear()
 
-    # Top wall
-    stdscr.addstr(0, 0, "+" + "-" * WIDTH + "+")
+    # Create the game buffer
+    buffer = [[' ' for _ in range(WIDTH)] for _ in range(HEIGHT)]
 
-    # Playable area with side walls
-    for y in range(HEIGHT):
-        row = "|"
-        for x in range(WIDTH):
-            # Check for dog
-            if x == dog_x and y == dog_y:
-                row += "@"
-            # Check for lasers
-            elif any(laser['x'] == x and laser['y'] == y for laser in lasers):
-                laser = next(l for l in lasers if l['x'] == x and l['y'] == y)
-                row += laser['symbol']
-            # Check for cats
-            elif any(cat['x'] == x and cat['y'] == y for cat in cats):
-                cat = next(c for c in cats if c['x'] == x and c['y'] == y)
-                if cat['sleeping']:
-                    row += 'z'  # Sleeping cat
-                elif cat['hunter']:
-                    row += '*'  # Hunter cat
-                else:
-                    row += cat['symbol']
+    # Draw furniture into buffer (background)
+    for furn in FURNITURE:
+        fx, fy = furn['x'], furn['y']
+        for i, ch in enumerate(furn['char']):
+            if 0 <= fx + i < WIDTH and 0 <= fy < HEIGHT:
+                buffer[fy][fx + i] = ch
+
+    # Draw lasers
+    for laser in lasers:
+        lx, ly = laser['x'], laser['y']
+        if 0 <= lx < WIDTH and 0 <= ly < HEIGHT:
+            buffer[ly][lx] = laser['symbol']
+
+    # Draw cats
+    for cat in cats:
+        cx, cy = cat['x'], cat['y']
+        if 0 <= cx < WIDTH and 0 <= cy < HEIGHT:
+            if cat['sleeping']:
+                buffer[cy][cx] = 'ᵶ'
+            elif cat['hunter']:
+                buffer[cy][cx] = '☠'
             else:
-                row += " "
-        row += "|"
-        stdscr.addstr(y + 1, 0, row)
+                buffer[cy][cx] = cat['symbol']
 
-    # Bottom wall
-    stdscr.addstr(HEIGHT + 1, 0, "+" + "-" * WIDTH + "+")
+    # Draw dog
+    if 0 <= dog_x < WIDTH and 0 <= dog_y < HEIGHT:
+        buffer[dog_y][dog_x] = '@'
 
-    # Status line
-    stdscr.addstr(HEIGHT + 2, 0, f"Score: {score} | Lives: {lives} | SPACE: shoot | 'q': quit")
+    # === DRAW THE FRAME ===
+
+    # Title bar
+    title = "══════════════════╡ M O N S T A M A N ╞══════════════════"
+    stdscr.addstr(0, 0, "╔" + title[:WIDTH] + "╗")
+
+    # Score and timer line
+    score_str = f" Score: {score:04d} "
+    lives_str = f" Lives: {'♥' * lives}{'♡' * (5 - lives)} "
+    timer_str = f" Time: {get_elapsed_time()} "
+    kills_str = f" Kills: {cats_killed}/{CATS_TO_WIN} "
+
+    header = f"║{score_str}{lives_str}"
+    padding = WIDTH - len(score_str) - len(lives_str) - len(timer_str) - len(kills_str)
+    header += " " * padding + kills_str + timer_str + "║"
+    stdscr.addstr(1, 0, header[:WIDTH + 2])
+
+    # Top wall with windows
+    window = "┌──╔══╗──┐"
+    top_wall = "╠" + "═" * 5 + window + "═" * (WIDTH - 20) + window + "═" * 5 + "╣"
+    stdscr.addstr(2, 0, top_wall[:WIDTH + 2])
+
+    # Window details row
+    window_detail = "│▒▒║  ║▒▒│"
+    detail_row = "║" + "░" * 5 + window_detail + "░" * (WIDTH - 20) + window_detail + "░" * 5 + "║"
+    stdscr.addstr(3, 0, detail_row[:WIDTH + 2])
+
+    # Window bottom
+    window_bottom = "└──╚══╝──┘"
+    bottom_row = "║" + " " * 5 + window_bottom + " " * (WIDTH - 20) + window_bottom + " " * 5 + "║"
+    stdscr.addstr(4, 0, bottom_row[:WIDTH + 2])
+
+    # Main play area
+    for y in range(HEIGHT):
+        row_content = "".join(buffer[y])
+
+        # Add door on right side at certain rows
+        if 8 <= y <= 12:
+            if y == 8:
+                right_wall = "╔═╗"
+            elif y == 12:
+                right_wall = "╚═╝"
+            elif y == 10:
+                right_wall = "║●║"  # Door knob
+            else:
+                right_wall = "║ ║"
+            stdscr.addstr(y + 5, 0, "║" + row_content + right_wall)
+        else:
+            stdscr.addstr(y + 5, 0, "║" + row_content + "║")
+
+    # Floor with rug pattern
+    rug_pattern = "░▓" * (WIDTH // 2)
+    stdscr.addstr(HEIGHT + 5, 0, "╠" + rug_pattern[:WIDTH] + "╣")
+
+    # Bottom decorative border
+    stdscr.addstr(HEIGHT + 6, 0, "╚" + "═" * WIDTH + "╝")
+
+    # Control hints
+    hint = "  [←↑↓→] Move   [SPACE] Shoot   [Q] Quit  "
+    stdscr.addstr(HEIGHT + 7, 0, hint)
+
+    # Legend
+    legend = "  @ = You   ☠ = Hunter   ᵶ = Sleeping   ^v<> = Cats"
+    stdscr.addstr(HEIGHT + 8, 0, legend)
+
+    stdscr.refresh()
+
+def draw_game_over(stdscr, won):
+    # Draw status board overlay
+    box_width = 36
+    box_height = 12
+    start_x = (WIDTH - box_width) // 2
+    start_y = (HEIGHT - box_height) // 2 + 3
+
+    # Box border
+    stdscr.addstr(start_y, start_x, "╔" + "═" * (box_width - 2) + "╗")
+    for i in range(1, box_height - 1):
+        stdscr.addstr(start_y + i, start_x, "║" + " " * (box_width - 2) + "║")
+    stdscr.addstr(start_y + box_height - 1, start_x, "╚" + "═" * (box_width - 2) + "╝")
+
+    if won:
+        # Win message
+        stdscr.addstr(start_y + 1, start_x + 2, "    ★ ★ ★  YOU WIN!  ★ ★ ★    ")
+        stdscr.addstr(start_y + 2, start_x + 2, "                                ")
+        stdscr.addstr(start_y + 3, start_x + 2, "      \\(^◡^)/  WOOF WOOF!       ")
+        stdscr.addstr(start_y + 4, start_x + 2, "       /|  |\\                   ")
+    else:
+        # Lose message
+        stdscr.addstr(start_y + 1, start_x + 2, "      ✗ ✗  GAME OVER  ✗ ✗      ")
+        stdscr.addstr(start_y + 2, start_x + 2, "                                ")
+        stdscr.addstr(start_y + 3, start_x + 2, "        (×_×)  *meow*           ")
+        stdscr.addstr(start_y + 4, start_x + 2, "       The cats got you!        ")
+
+    stdscr.addstr(start_y + 5, start_x + 2, "────────────────────────────────")
+    stdscr.addstr(start_y + 6, start_x + 2, f"  Final Score:  {score:04d}            ")
+    stdscr.addstr(start_y + 7, start_x + 2, f"  Cats Killed:  {cats_killed}               ")
+    stdscr.addstr(start_y + 8, start_x + 2, f"  Time:         {get_elapsed_time()}             ")
+    stdscr.addstr(start_y + 9, start_x + 2, "────────────────────────────────")
+    stdscr.addstr(start_y + 10, start_x + 2, "     Press any key to exit      ")
 
     stdscr.refresh()
 
 def move_dog(direction):
     global dog_x, dog_y
-    if direction == 'left' and dog_x > 0:
-        dog_x -= 1
-    elif direction == 'right' and dog_x < WIDTH - 1:
-        dog_x += 1
-    elif direction == 'up' and dog_y > 0:
-        dog_y -= 1
-    elif direction == 'down' and dog_y < HEIGHT - 1:
-        dog_y += 1
+    new_x, new_y = dog_x, dog_y
+
+    if direction == 'left' and dog_x > 1:
+        new_x -= 1
+    elif direction == 'right' and dog_x < WIDTH - 2:
+        new_x += 1
+    elif direction == 'up' and dog_y > 1:
+        new_y -= 1
+    elif direction == 'down' and dog_y < HEIGHT - 2:
+        new_y += 1
+
+    # Check furniture collision (simplified - just don't walk into first char of furniture)
+    can_move = True
+    for furn in FURNITURE:
+        fx, fy = furn['x'], furn['y']
+        flen = len(furn['char'])
+        if fy == new_y and fx <= new_x < fx + flen:
+            can_move = False
+            break
+
+    if can_move:
+        dog_x, dog_y = new_x, new_y
 
 def shoot_laser():
     if last_direction == 'up':
-        lasers.append({'x': dog_x, 'y': dog_y - 1, 'dx': 0, 'dy': -1, 'symbol': '|'})
+        lasers.append({'x': dog_x, 'y': dog_y - 1, 'dx': 0, 'dy': -1, 'symbol': '║'})
     elif last_direction == 'down':
-        lasers.append({'x': dog_x, 'y': dog_y + 1, 'dx': 0, 'dy': 1, 'symbol': '|'})
+        lasers.append({'x': dog_x, 'y': dog_y + 1, 'dx': 0, 'dy': 1, 'symbol': '║'})
     elif last_direction == 'left':
-        lasers.append({'x': dog_x - 1, 'y': dog_y, 'dx': -1, 'dy': 0, 'symbol': '-'})
+        lasers.append({'x': dog_x - 1, 'y': dog_y, 'dx': -1, 'dy': 0, 'symbol': '═'})
     elif last_direction == 'right':
-        lasers.append({'x': dog_x + 1, 'y': dog_y, 'dx': 1, 'dy': 0, 'symbol': '-'})
+        lasers.append({'x': dog_x + 1, 'y': dog_y, 'dx': 1, 'dy': 0, 'symbol': '═'})
 
 def move_lasers():
     global lasers
     for laser in lasers:
         laser['x'] += laser['dx']
         laser['y'] += laser['dy']
-    # Remove lasers that went off screen
     lasers = [laser for laser in lasers if 0 <= laser['x'] < WIDTH and 0 <= laser['y'] < HEIGHT]
 
 def move_cats():
     global cats
     for cat in cats:
-        # Sleeping cats might wake up (10% chance each move)
         if cat['sleeping']:
             if random.random() < 0.1:
                 cat['sleeping'] = False
-            continue  # Skip movement if sleeping
+            continue
 
-        # Awake cats might fall asleep (5% chance)
         if random.random() < 0.05:
             cat['sleeping'] = True
             continue
 
-        # Hunter cats move toward dog
         if cat['hunter']:
             if dog_x > cat['x']:
                 cat['dx'] = 1
@@ -140,9 +283,7 @@ def move_cats():
         cat['x'] += cat['dx']
         cat['y'] += cat['dy']
 
-    # Remove cats that went off screen (only non-hunters)
     cats = [cat for cat in cats if cat['hunter'] or (0 <= cat['x'] < WIDTH and 0 <= cat['y'] < HEIGHT)]
-    # Keep hunters in bounds
     for cat in cats:
         if cat['hunter']:
             cat['x'] = max(0, min(WIDTH - 1, cat['x']))
@@ -150,33 +291,31 @@ def move_cats():
 
 def spawn_cat():
     if len(cats) >= MAX_CATS:
-        return  # Don't spawn if at max
+        return
 
     side = random.choice(['top', 'bottom', 'left', 'right'])
     if side == 'top':
-        x = random.randint(0, WIDTH - 1)
+        x = random.randint(1, WIDTH - 2)
         y = 0
         dx, dy = 0, 1
-        symbol = 'v'
+        symbol = '▼'
     elif side == 'bottom':
-        x = random.randint(0, WIDTH - 1)
+        x = random.randint(1, WIDTH - 2)
         y = HEIGHT - 1
         dx, dy = 0, -1
-        symbol = '^'
+        symbol = '▲'
     elif side == 'left':
         x = 0
-        y = random.randint(0, HEIGHT - 1)
+        y = random.randint(1, HEIGHT - 2)
         dx, dy = 1, 0
-        symbol = '>'
-    else:  # right
+        symbol = '►'
+    else:
         x = WIDTH - 1
-        y = random.randint(0, HEIGHT - 1)
+        y = random.randint(1, HEIGHT - 2)
         dx, dy = -1, 0
-        symbol = '<'
+        symbol = '◄'
 
-    # 30% chance to be a hunter (attracted to dog)
     is_hunter = random.random() < 0.3
-    # 20% chance to be sleeping
     is_sleeping = random.random() < 0.2
 
     cats.append({
@@ -196,7 +335,7 @@ def check_cat_reached_dog():
             cats.remove(cat)
 
 def check_collisions():
-    global lasers, cats, score
+    global lasers, cats, score, cats_killed
     lasers_to_remove = []
     cats_to_remove = []
 
@@ -206,6 +345,7 @@ def check_collisions():
                 lasers_to_remove.append(laser)
                 cats_to_remove.append(cat)
                 score += 10
+                cats_killed += 1
 
     for laser in lasers_to_remove:
         if laser in lasers:
@@ -215,25 +355,30 @@ def check_collisions():
             cats.remove(cat)
 
 def game_loop(stdscr):
-    global frame_count, cat_move_counter, lives, last_direction
+    global frame_count, cat_move_counter, lives, last_direction, game_start_time
 
-    # Setup curses
-    curses.curs_set(0)  # Hide cursor
-    stdscr.keypad(True)  # Enable arrow keys
-    stdscr.nodelay(True)  # Non-blocking input
+    curses.curs_set(0)
+    stdscr.keypad(True)
+    stdscr.nodelay(True)
 
+    game_start_time = time.time()
+    init_furniture()
     init_cats()
 
     while True:
         draw_canvas(stdscr)
 
-        # Check for game over
+        # Check win condition
+        if cats_killed >= CATS_TO_WIN:
+            stdscr.nodelay(False)
+            draw_game_over(stdscr, won=True)
+            stdscr.getch()
+            break
+
+        # Check lose condition
         if lives <= 0:
             stdscr.nodelay(False)
-            stdscr.addstr(HEIGHT // 2 + 1, WIDTH // 2 - 4, "GAME OVER!")
-            stdscr.addstr(HEIGHT // 2 + 2, WIDTH // 2 - 8, f"Final Score: {score}")
-            stdscr.addstr(HEIGHT // 2 + 3, WIDTH // 2 - 8, "Press any key...")
-            stdscr.refresh()
+            draw_game_over(stdscr, won=False)
             stdscr.getch()
             break
 
@@ -258,7 +403,6 @@ def game_loop(stdscr):
 
         move_lasers()
 
-        # Move cats slower
         cat_move_counter += 1
         if cat_move_counter >= CAT_MOVE_INTERVAL:
             move_cats()
@@ -267,13 +411,12 @@ def game_loop(stdscr):
         check_collisions()
         check_cat_reached_dog()
 
-        # Spawn new cats periodically
         frame_count += 1
         if frame_count >= SPAWN_INTERVAL:
             spawn_cat()
             frame_count = 0
 
-        curses.napms(100)  # 100ms delay for game speed
+        curses.napms(80)
 
 if __name__ == "__main__":
     curses.wrapper(game_loop)
